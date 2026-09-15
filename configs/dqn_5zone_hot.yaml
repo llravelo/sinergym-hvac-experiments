@@ -1,0 +1,36 @@
+env_id: Eplus-5zone-hot-discrete-v1
+
+reward:
+  class: common.rewards.ProjectReward
+  kwargs:
+    temperature_variables: [air_temperature]
+    energy_variables: [HVAC_electricity_demand_rate]
+    range_comfort_winter: [20.0, 23.5]
+    range_comfort_summer: [23.0, 26.0]
+    summer_start: [6, 1]
+    summer_final: [9, 30]
+    energy_weight: 0.5
+    max_energy_penalty: 8
+    max_comfort_penalty: 12
+
+model:
+  algorithm: DQN
+  policy: MlpPolicy
+  seed: 0
+  # Kept small on purpose -- a smoke-test-scale run, not a real training
+  # budget. One simulated year is 35,040 timesteps; increase these once
+  # actually training rather than shaking out the pipeline.
+  hyperparameters:
+    learning_starts: 100
+    buffer_size: 1000
+    batch_size: 32
+    train_freq: 1
+
+train:
+  total_timesteps: 500
+
+wandb:
+  entity: null # set to your wandb entity/username to enable logging
+  project: 43008-rl-sinergym
+  group: dqn-5zone-hot
+  tags: [dqn, discrete, 5zone, hot]

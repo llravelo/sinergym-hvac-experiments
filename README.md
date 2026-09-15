@@ -33,9 +33,18 @@ Everything runs in **ephemeral containers**: each `make` command starts a throwa
 | Command | What it does |
 |---|---|
 | `make verify` | Headlessly runs a notebook top-to-bottom in a throwaway container and saves the executed outputs back into the file — a quick way to confirm a notebook's pipeline still works, without watching it run. Defaults to `notebooks/hello_world.ipynb`; point it at a different notebook with `make verify NB=notebooks/your_notebook.ipynb`. |
+| `make train` | Runs a config-driven training script (`scripts/train.py`) in a throwaway container. Defaults to `configs/dqn_5zone_hot.yaml`; point it at a different config with `make train CONFIG=configs/your_config.yaml`. See "Experiment configs" below. |
 | `make lab` | Starts an interactive JupyterLab server you can use from your browser, for actually writing/running code cell-by-cell. Prints a URL like `http://localhost:8888/...?token=...` — open that in your browser. Press Ctrl+C in the terminal to stop it; the container is removed automatically. |
 | `make shell` | Drops you into an interactive `bash` shell inside a throwaway container — useful for poking around, checking installed packages, or running one-off commands. Type `exit` to leave; the container is removed automatically. |
 | `make clean` | Deletes the `Eplus-*-res*/` folders that simulations leave behind (raw EnergyPlus engine output — error logs, sizing calcs, etc; not something you need to keep). Uses the container to do the deleting because those folders are owned by `root` on your host (see note below) and a plain `rm -rf` from your own shell will fail with a permissions error. |
+
+## Experiment configs
+
+`configs/*.yaml` describe a training run: env id, reward class and kwargs, model algorithm and hyperparameters, total timesteps, and optional wandb settings. `scripts/train.py` reads one and runs it (`make train CONFIG=configs/your_config.yaml`). Shared code (the env-building logic, the project's reward class) lives in `common/`.
+
+To enable wandb logging, set `wandb.entity` (and `wandb.project`, already set) in the config, and export `WANDB_API_KEY` in your shell before running `make train` — it's passed through to the container automatically. With `entity` left `null`, training runs without wandb logging.
+
+The project reward class is `common.rewards.ProjectReward` (currently identical to Sinergym's `NormalizedLinearReward`) — edit it there as reward requirements change, rather than in each config.
 
 ## Notes
 
