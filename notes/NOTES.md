@@ -33,6 +33,54 @@ Checked against the installed Sinergym version (3.12.2) and stable-baselines3 (2
 - **Action space isn't centered near zero.** Real bounds are heating `[12, 23.25]`, cooling `[23.25, 30]` — both far from 0, asymmetric. PPO's Gaussian policy head initializes to output near 0. Sinergym's `NormalizeAction` wrapper (rescales the real Box to `[-1, 1]` for the policy, maps back before sending to the simulator) exists specifically for this — its docstring calls it "very useful in DRL algorithms." Skipping it risks a policy whose initial actions saturate against the real bounds, slowing early learning.
 - **Two coupled actuators.** Heating and cooling setpoints are sampled independently by a diagonal Gaussian; nothing in the action space itself prevents sampling a physically backwards pair (heating setpoint above cooling setpoint). Worth checking whether Sinergym clips/handles this internally or leaves it for the agent to learn to avoid.
 
+### Config schema convention: shared vs. model-specific fields
+
+When writing a new model config (e.g. the discrete/continuous PPO configs), decide where each field goes by asking: does it define *what problem* is being solved, or *how a particular algorithm* solves it?
+
+- **Shared — must be identical across every config in the comparison:** `reward.class`/`reward.kwargs`, `model.seed`, `model.gamma` (defines the discounted-return objective itself, not algorithm machinery), `train.total_timesteps` (the sample budget each algorithm gets). Also enforced in code rather than YAML: the `NormalizeObservation`/`LoggerWrapper` wrapper stack in `common/envs.py` applies to every config the same way.
+- **The independent variable — deliberately *not* forced equal:** `env_id`. DQN and discrete PPO should use the *same* `env_id` (that pairing is the real algorithm-quality comparison); continuous PPO necessarily uses a different one. This is the thing being studied, not a hyperparameter to tune for convenience.
+- **Model-specific — free to differ, tune per algorithm:** everything under `model.hyperparameters` (DQN's `buffer_size`/`learning_starts`/`train_freq`/`target_update_interval` have no PPO analog; PPO's `n_steps`/`n_epochs`/`gae_lambda`/`ent_coef`/`clip_range` have no DQN analog), `learning_rate` (value-based and policy-gradient losses live on different scales — matching the number isn't "more fair," it's arbitrary), network architecture (`policy_kwargs`), and the exploration mechanism (DQN's epsilon-greedy schedule vs. PPO's entropy bonus). Note that same-named fields (e.g. `batch_size`) don't need matching values across algorithms since they play different mechanical roles.
+- `wandb.group`/`wandb.tags` should *differ* per config (that's how runs get told apart); `wandb.entity`/`wandb.project` should be *shared* team-wide so everyone's runs land in one place to compare.
+- `eval.*` (below) is also shared: evaluating one model over fewer/more episodes than another biases the comparison.
+
+### Evaluation
+
+Two-tier, following Manjavacas et al. 2024's methodology (their freq=4 training episodes / eval length=3 / final eval=20 episodes), adapted for our brief's extra metric:
+
+1. **Periodic in-training eval** (`scripts/train.py`, SB3 `EvalCallback`, config's `eval.freq_timesteps`/`eval.n_episodes`) -- runs on a separate eval env instance (never `WandBLogger`-wrapped, to avoid double `wandb.init()` in one process), `deterministic=True`, saves the best checkpoint to `models/<wandb.group>/best_model.zip` rather than trusting whatever the final timestep happens to land on.
+2. **Final held-out evaluation** (`scripts/evaluate.py`, `python -m scripts.evaluate <config> <model_path>`) -- runs `eval.final_n_episodes` episodes with the best checkpoint and reports mean±SD for mean reward, mean power demand, and comfort violation split into **operational vs. unoccupied hours** (the brief's metric, not in the paper) using per-step occupancy.
+
+Even a fully deterministic policy (SB3 DQN's default eval mode, no epsilon) on a non-stochastic weather file isn't guaranteed to produce identical episodes -- the paper's own RBC baseline (a fixed rule, no learning) shows nonzero variance across 20 "identical" eval episodes (their Table 9), implying EnergyPlus itself has some run-to-run noise. Report mean±SD across multiple eval episodes for every controller, including DQN, rather than assuming 1 episode suffices because the policy is deterministic.
+
+**Outstanding verification (blocks trusting `scripts/evaluate.py`'s numbers):** `_extract_step_metrics()` in that file uses placeholder `info` dict keys (`total_power_demand`, `total_temperature_violation`, `occupant_count`) that are NOT confirmed against the installed Sinergym version. Run this in `make shell` before relying on eval output:
+
+```
+python -c "
+import gymnasium as gym, sinergym
+env = gym.make('Eplus-5zone-hot-discrete-v1')
+obs, info = env.reset()
+obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+print(sorted(info.keys()))
+print(info)
+try:
+    print(env.get_wrapper_attr('observation_variables'))
+except Exception as e:
+    print('no observation_variables:', e)
+"
+```
+
+and fix the keys in `_extract_step_metrics` to match what's actually returned.
+
+**Second outstanding verification: `NormalizeObservation` statistics aren't synced between the training env and the eval env.** `NormalizeObservation` maintains a *running* mean/variance and whitens observations against it -- it's applied identically (same procedure) to every config, but the concrete numbers it produces are data-dependent per env instance, since the running stats are estimated online from whatever trajectory that instance has seen. `scripts/train.py`'s `eval_env` gets its own fresh, independently-initialized `NormalizeObservation` -- not synced with the training env's accumulated stats -- so `EvalCallback` may be scoring checkpoints under a materially different observation distribution than the one the policy was actually trained on at that point (worse early in training, before stats converge). SB3 has `stable_baselines3.common.vec_env.sync_envs_normalization` for exactly this problem with its own `VecNormalize`, but that's built for `VecEnv`-wrapped `VecNormalize`, not necessarily compatible with Sinergym's `NormalizeObservation` on a plain `gym.Env`. Before trusting `EvalCallback`'s checkpoint selection, check inside the container whether `NormalizeObservation` exposes anything to sync/freeze/copy its stats (e.g. `env.get_wrapper_attr('mean')`/`var`, a `.training` flag, a save/load method) -- inspect the class directly:
+
+```
+python -c "
+import gymnasium as gym, sinergym, inspect
+from sinergym.utils.wrappers import NormalizeObservation
+print(inspect.getsource(NormalizeObservation))
+"
+```
+
 ### Cross-model comparison pitfall
 
 Discrete DQN/PPO get a 10-action grid; continuous PPO gets the full 2D continuous space. This is not an apples-to-apples comparison of algorithm quality — continuous PPO has strictly finer control resolution by construction, so part of any performance gap reflects that rather than the RL algorithm itself. Decide upfront whether that's a deliberate part of the evaluation question (discretization cost) or something to control for (e.g., a finer discrete grid).
